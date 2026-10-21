@@ -1,0 +1,14 @@
+[project]
+name = "gscore-onebot-uid"
+version = "1.0.0"
+description = "早柚核心（GsCore）OneBot v11 适配器：主动连接协议端，双向转换 OneBot 与早柚协议"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=13.1",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,28 @@
+line-length = 120
+target-version = "py311"
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "pyproject.toml",
+    "**/*.toml",
+]
+
+[lint]
+select = ["E", "F", "I", "W", "ASYNC"]
+# ASYNC109 只按签名里有没有 timeout 参数判定，这里是透传给接口调用的，不改
+ignore = ["ASYNC109"]
+
+[lint.isort]
+combine-as-imports = true
+length-sort = true
+known-first-party = ["gsuid_core", "OneBotUID"]
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
