@@ -134,7 +134,7 @@ async def _segments_to_content(
             content.append(await _file_message(seg, ctx, scope))
         elif kind in _FORWARD_TYPES:
             nodes = await _forward_items(pick(seg, "id", "message_id", "resid"), ctx, depth, seen, scope)
-            content.append(Message("node", nodes))
+            content.append(Message("node", nodes or [Message("text", _NODE_MARK)]))
         elif kind == "mface":
             content.append(Message("text", pick(seg, "summary") or "[表情]"))
     return content
@@ -189,7 +189,7 @@ async def _quote_context(reply_id: str, ctx: InboundContext, scope: Optional[Cha
     if response_failed(resp):
         return placeholder
     data = response_data(resp)
-    if data is None:
+    if data is None or not _quote_in_scope(data, scope, ctx.self_id):
         return placeholder
 
     segments = _segments_of(data.get("message"))
@@ -199,12 +199,32 @@ async def _quote_context(reply_id: str, ctx: InboundContext, scope: Optional[Cha
     text = "".join(pick(seg, "text") for seg in segments if seg.type == "text").strip()
     images = [pick(seg, "url", "file") for seg in segments if seg.type == "image"]
     forward = [seg for seg in segments if seg.type in _FORWARD_TYPES]
-    nodes = await _segments_to_content(forward, ctx, scope=scope) if forward else []
+
+    items: list[Message] = []
+    for seg in forward:
+        items.extend(await _forward_items(pick(seg, "id", "message_id", "resid"), ctx, scope=scope))
+    if forward and not items:
+        text = "\n".join([text, *(_forward_title(seg) for seg in forward)]).strip()
 
     content: list[Message] = [Message("reply", text)]
     content.extend(Message("image", url) for url in images if url)
-    content.extend(item for item in nodes if item.type == "node")
+    if items:
+        content.append(Message("node", items))
     return content
+
+
+def _quote_in_scope(data: dict[str, object], scope: Optional[ChatScope], self_id: str) -> bool:
+    if scope is None:
+        return True
+    if scope.group_id:
+        group_id = sid(data.get("group_id"))
+        return not group_id or group_id == scope.group_id
+    user_id = sid(data.get("user_id"))
+    return not user_id or user_id in (scope.user_id, self_id)
+
+
+def _forward_title(seg: ObSegment) -> str:
+    return pick(seg, "prompt", "summary", "title", "name") or _NODE_MARK
 
 
 async def _forward_items(
@@ -217,16 +237,16 @@ async def _forward_items(
     if seen is None:
         seen = set()
     if not forward_id or depth >= _NODE_MAX_DEPTH or forward_id in seen:
-        return [Message("text", _NODE_MARK)]
+        return []
 
     seen.add(forward_id)
-    resp = await ctx.api.call("get_forward_msg", {"id": id_param(forward_id)})
+    resp = await ctx.api.call("get_forward_msg", {"id": forward_id})
     if response_failed(resp):
-        return [Message("text", _NODE_MARK)]
+        return []
     data = response_data(resp)
     entries = _forward_entries(data if data is not None else resp)
     if not entries:
-        return [Message("text", _NODE_MARK)]
+        return []
 
     items: list[Message] = []
     for entry in entries:
@@ -242,7 +262,7 @@ async def _forward_items(
         elif isinstance(raw, list):
             items.extend(await _segments_to_content(raw, ctx, depth + 1, seen, scope))
 
-    return items or [Message("text", _NODE_MARK)]
+    return items
 
 
 def _forward_entries(payload: dict[str, object]) -> list[object]:
