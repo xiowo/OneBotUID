@@ -1,3 +1,4 @@
+import re
 import random
 from typing import Callable, Optional, Awaitable
 
@@ -16,6 +17,7 @@ _NODE_MAX = 99
 _LOG_PREFIX = "log_"
 _SIGNATURE_MAX = 32
 _SIGNATURE_PUNCT = "，,。.！!？?、；;：:"
+_CQ_AT_RE = re.compile(r"\[CQ:at,\s*qq=([0-9]+|all)\]", re.IGNORECASE)
 
 
 class OutboundSender:
@@ -189,7 +191,7 @@ class OutboundSender:
             if kind is None or data is None:
                 continue
             if kind == "text":
-                segments.append({"type": "text", "data": {"text": str(data)}})
+                segments.extend(_text_segments(str(data)))
             elif kind == "image":
                 segments.append(
                     {
@@ -210,7 +212,7 @@ class OutboundSender:
             elif kind == "node":
                 segments.extend(self._node_segments(data))
             elif kind == "markdown":
-                segments.append({"type": "text", "data": {"text": str(data)}})
+                segments.extend(_text_segments(str(data)))
         return segments
 
     def _summary(self) -> str:
@@ -272,6 +274,24 @@ def _is_signature(text: str) -> bool:
     if not name or len(name) > _SIGNATURE_MAX:
         return False
     return not any(ch.isspace() or ch in _SIGNATURE_PUNCT for ch in name)
+
+
+def _text_segments(raw: str) -> list[dict[str, object]]:
+    if "[CQ:" not in raw:
+        return [{"type": "text", "data": {"text": raw}}]
+
+    segments: list[dict[str, object]] = []
+    last = 0
+    for matched in _CQ_AT_RE.finditer(raw):
+        chunk = raw[last : matched.start()]
+        if chunk:
+            segments.append({"type": "text", "data": {"text": chunk}})
+        segments.append({"type": "at", "data": {"qq": matched.group(1)}})
+        last = matched.end()
+    tail = raw[last:]
+    if tail:
+        segments.append({"type": "text", "data": {"text": tail}})
+    return segments
 
 
 def _strip_scheme(raw: str) -> str:

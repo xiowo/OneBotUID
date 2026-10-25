@@ -22,7 +22,6 @@ _CQ_PLACEHOLDER = {
     "mface": "[表情]",
     "record": "[语音]",
     "video": "[视频]",
-    "at": "@",
     "reply": "",
 }
 
@@ -70,7 +69,7 @@ async def _from_message(event: ObEvent, ctx: InboundContext) -> Optional[Message
     if segments:
         content = await _segments_to_content(segments, ctx, scope=scope)
     else:
-        content = [Message("text", _cq_to_text(event.raw_message or str(event.message or "")))]
+        content = _cq_to_content(event.raw_message or str(event.message or ""))
 
     reply_id = ""
     for seg in segments:
@@ -258,7 +257,7 @@ async def _forward_items(
             items.append(Message("text", f"{nickname}:"))
         raw = node.message if node.message is not None else node.content
         if isinstance(raw, str):
-            items.append(Message("text", _cq_to_text(raw)))
+            items.extend(_cq_to_content(raw))
         elif isinstance(raw, list):
             items.extend(await _segments_to_content(raw, ctx, depth + 1, seen, scope))
 
@@ -298,14 +297,36 @@ def _segments_of(raw: object) -> list[ObSegment]:
     return segments
 
 
-def _cq_to_text(raw: str) -> str:
+def _cq_to_content(raw: str) -> list[Message]:
     if not raw:
-        return ""
+        return []
 
-    def _replace(match: re.Match[str]) -> str:
-        return _CQ_PLACEHOLDER.get(match.group(1), "")
+    content: list[Message] = []
+    last = 0
+    for match in _CQ_PATTERN.finditer(raw):
+        chunk = raw[last : match.start()]
+        if chunk.strip():
+            content.append(Message("text", chunk))
 
-    return _CQ_PATTERN.sub(_replace, raw).strip()
+        kind = match.group(1)
+        qq = _cq_param(match.group(0), "qq")
+        if kind == "at" and qq:
+            content.append(Message("at", qq))
+        else:
+            placeholder = _CQ_PLACEHOLDER.get(kind, "")
+            if placeholder:
+                content.append(Message("text", placeholder))
+        last = match.end()
+
+    tail = raw[last:]
+    if tail.strip():
+        content.append(Message("text", tail))
+    return content
+
+
+def _cq_param(code: str, key: str) -> str:
+    matched = re.search(rf"(?:^|,){key}=([^,\]]*)", code)
+    return matched.group(1).strip() if matched else ""
 
 
 def _from_notice(event: ObEvent, ctx: InboundContext) -> Optional[MessageReceive]:
