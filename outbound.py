@@ -23,17 +23,18 @@ _CQ_AT_RE = re.compile(r"\[CQ:at,\s*qq=([0-9]+|all)\]", re.IGNORECASE)
 class OutboundSender:
     def __init__(
         self,
-        api: OneBotApi,
+        pick_api: Callable[[str], Optional[OneBotApi]],
         push: Callable[[MessageReceive], Awaitable[None]],
         settings: Settings,
         self_id: Callable[[], str],
         nickname: Callable[[], str],
     ) -> None:
-        self._api = api
+        self._pick_api = pick_api
         self._push = push
         self._settings = settings
         self._self_id = self_id
         self._nickname = nickname
+        self._carry_self_id = True
 
     async def __call__(self, payload: bytes) -> None:
         await self.dispatch(payload)
@@ -51,10 +52,10 @@ class OutboundSender:
 
         head = content[0]
         if len(content) == 1 and head.type == "excute_delete_message":
-            await self._delete(head.data)
+            await self._delete(head.data, send.bot_self_id)
             return
         if len(content) == 1 and head.type == "excute_ban_user":
-            await self._ban(head.data)
+            await self._ban(head.data, send.bot_self_id)
             return
         if head.type is not None and head.type.startswith(_LOG_PREFIX):
             self._log(head.type, head.data)
@@ -80,16 +81,18 @@ class OutboundSender:
         target = sid(send.target_id)
         direct = send.target_type == "direct"
         if any(seg.get("type") == "node" for seg in segments):
-            resp = await self._send_forward(target, direct, segments)
+            resp = await self._send_forward(target, direct, segments, send.bot_self_id)
         elif direct:
-            resp = await self._api.call(
+            resp = await self._request(
                 "send_private_msg",
                 {"user_id": id_param(target), "message": segments},
+                send.bot_self_id,
             )
         else:
-            resp = await self._api.call(
+            resp = await self._request(
                 "send_group_msg",
                 {"group_id": id_param(target), "message": segments},
+                send.bot_self_id,
             )
         if response_failed(resp):
             return None
@@ -98,11 +101,34 @@ class OutboundSender:
             return None
         return sid(data.get("message_id")) or None
 
+    async def _request(
+        self,
+        action: str,
+        params: dict[str, object],
+        self_id: str,
+    ) -> Optional[dict[str, object]]:
+        api = self._pick_api(self_id)
+        if api is None:
+            logger.warning(f"[OneBotUID] 找不到 self_id={self_id or '未知'} 对应的连接，接口 {action} 已跳过")
+            return None
+
+        if not (self._carry_self_id and self_id):
+            return await api.call(action, params)
+
+        resp = await api.call(action, {**params, "self_id": id_param(self_id)})
+        if resp is None or not response_failed(resp):
+            return resp
+
+        self._carry_self_id = False
+        logger.debug(f"[OneBotUID] 协议端不接受 self_id 参数，后续发送不再携带（接口 {action}）")
+        return await api.call(action, params)
+
     async def _send_forward(
         self,
         target: str,
         direct: bool,
         segments: list[dict[str, object]],
+        self_id: str,
     ) -> Optional[dict[str, object]]:
         nodes = [seg for seg in segments if seg.get("type") == "node"]
         plain = [seg for seg in segments if seg.get("type") != "node"]
@@ -110,7 +136,7 @@ class OutboundSender:
             nodes.insert(0, self._wrap_node(plain))
         action = "send_private_forward_msg" if direct else "send_group_forward_msg"
         key = "user_id" if direct else "group_id"
-        return await self._api.call(action, {key: id_param(target), "messages": nodes})
+        return await self._request(action, {key: id_param(target), "messages": nodes}, self_id)
 
     def _wrap_node(self, segments: list[dict[str, object]]) -> dict[str, object]:
         return self._make_node(segments, *self._node_identity())
@@ -139,15 +165,15 @@ class OutboundSender:
         )
         await self._push(msg)
 
-    async def _delete(self, data: object) -> None:
+    async def _delete(self, data: object, self_id: str) -> None:
         if not isinstance(data, dict):
             return
         message_id = sid(data.get("message_id"))
         if not message_id:
             return
-        await self._api.call("delete_msg", {"message_id": id_param(message_id)})
+        await self._request("delete_msg", {"message_id": id_param(message_id)}, self_id)
 
-    async def _ban(self, data: object) -> None:
+    async def _ban(self, data: object, self_id: str) -> None:
         if not isinstance(data, dict):
             return
         user_id = sid(data.get("user_id"))
@@ -162,13 +188,14 @@ class OutboundSender:
         else:
             logger.warning("[OneBotUID] 禁言控制包 duration 非法，已忽略")
             return
-        await self._api.call(
+        await self._request(
             "set_group_ban",
             {
                 "group_id": id_param(group_id),
                 "user_id": id_param(user_id),
                 "duration": seconds,
             },
+            self_id,
         )
 
     def _log(self, kind: str, data: object) -> None:

@@ -21,6 +21,9 @@ MODE_CLIENT = "WS客户端"
 MODE_SERVER = "WS服务器"
 
 
+DEFAULT_ROUTE_BOT_ID = "OneBot"
+
+
 def _head_fields() -> dict[str, GSC]:
     """两种连接共用的前置字段：前端拿 enable 渲染卡片上的开关，拿 name 渲染卡片标题。"""
     return {
@@ -48,8 +51,8 @@ def _tail_fields() -> dict[str, GSC]:
         ),
         "route_bot_id": GsStrConfig(
             title="连接标识",
-            desc="这条连接在核心内的名字（WS_BOT_ID），多条连接必须互不相同。",
-            data="OneBot",
+            desc="这条连接在核心内的名字（WS_BOT_ID）。默认 OneBot，一般不用改；",
+            data=DEFAULT_ROUTE_BOT_ID,
         ),
         "platform_bot_id": GsStrConfig(
             title="平台标识",
@@ -83,7 +86,7 @@ SERVER_TEMPLATE: dict[str, GSC] = {
     ),
     "listen_port": GsIntConfig(
         title="监听端口",
-        desc="协议端那边填 ws://<本机IP>:<这个端口>。多条服务器连接各占一个端口。",
+        desc="协议端那边填 ws://<本机IP>:<这个端口>。一个端口可以同时接多个协议端，靠各自的 bot_self_id 区分。",
         data=3002,
         max_value=65535,
     ),
@@ -117,15 +120,15 @@ CONFIG_DEFAULT: dict[str, GSC] = {
     "client_links": GsRepeatGroupConfig(
         title="连接列表",
         desc="插件主动去连协议端的 WS 服务端。每条对应一个协议端，填对方的地址即可；"
-        "连接标识在多条连接（含服务器连接）之间不能重复。",
+        "懒得迁移数据可以直接改成你原来的WSID，否则不需要配置连接标识。",
         data=[deepcopy(CLIENT_TEMPLATE)],
         template=CLIENT_TEMPLATE,
     ),
     "_DividerServer": GsDivider("WS服务器连接", ""),
     "server_links": GsRepeatGroupConfig(
         title="连接列表",
-        desc="插件自己开 WS 服务端，等协议端连进来。每条填本机监听地址与端口，"
-        "多条服务器连接要各占一个端口；连接标识同样不能重复。",
+        desc="插件自己开 WS 服务端，等协议端连进来。每条填本机监听地址与端口；"
+        "一个端口可以同时接多个协议端。",
         data=[],
         template=SERVER_TEMPLATE,
     ),
@@ -352,7 +355,6 @@ def _group_rows(name: str) -> list[dict[str, GSC]]:
 def _build_settings(row: dict[str, GSC], mode: str) -> Settings:
     is_server = mode == MODE_SERVER
     template = SERVER_TEMPLATE if is_server else CLIENT_TEMPLATE
-    route_bot_id = str(_pick(row, "route_bot_id", template)).strip() or "OneBot"
     return Settings(
         name=str(_pick(row, "name", template)).strip(),
         enable=bool(_pick(row, "enable", template)),
@@ -361,7 +363,7 @@ def _build_settings(row: dict[str, GSC], mode: str) -> Settings:
         listen_host=(str(_pick(row, "listen_host", template)).strip() or "0.0.0.0") if is_server else "",
         listen_port=_as_int(_pick(row, "listen_port", template), 3002) if is_server else 0,
         access_token=str(_pick(row, "access_token", template)).strip(),
-        route_bot_id=route_bot_id,
+        route_bot_id=str(_pick(row, "route_bot_id", template)).strip() or DEFAULT_ROUTE_BOT_ID,
         platform_bot_id=str(_pick(row, "platform_bot_id", template)).strip() or "onebot",
         ignore_self=bool(_pick(row, "ignore_self", template)),
         reconnect_interval=max(1, _as_int(_global("reconnect_interval"), 5)),

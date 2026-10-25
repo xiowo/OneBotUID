@@ -41,6 +41,11 @@ class ChatScope:
     group_id: str = ""
 
 
+def _sid_or(value: object, fallback: str) -> str:
+    text = sid(value)
+    return text if text and text != "0" else fallback
+
+
 async def event_to_receive(event: ObEvent, ctx: InboundContext) -> Optional[MessageReceive]:
     if event.post_type == "message":
         return await _from_message(event, ctx)
@@ -58,7 +63,7 @@ async def _from_message(event: ObEvent, ctx: InboundContext) -> Optional[Message
     if not user_id:
         return None
 
-    self_id = ctx.self_id or sid(event.self_id)
+    self_id = _sid_or(event.self_id, ctx.self_id)
     if ctx.ignore_self and self_id and user_id == self_id:
         return None
 
@@ -352,12 +357,13 @@ def _from_notice(event: ObEvent, ctx: InboundContext) -> Optional[MessageReceive
         data["operator_id"] = operator_id
     if event.sub_type:
         data["sub_type"] = event.sub_type
+    self_id = _sid_or(event.self_id, ctx.self_id)
     if name == "poke":
-        data["target_id"] = sid(event.target_id) or ctx.self_id
+        data["target_id"] = _sid_or(event.target_id, self_id)
 
     return MessageReceive(
         bot_id=ctx.platform_bot_id,
-        bot_self_id=ctx.self_id or sid(event.self_id),
+        bot_self_id=self_id,
         msg_id="",
         user_type="group" if group_id else "direct",
         group_id=group_id or None,

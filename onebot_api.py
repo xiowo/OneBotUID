@@ -1,5 +1,5 @@
 import asyncio
-from typing import Callable, Awaitable
+from typing import Callable, Optional, Awaitable
 
 import msgspec
 from websockets.exceptions import ConnectionClosed
@@ -22,13 +22,16 @@ _PING_INTERVAL = 20
 
 
 class OneBotApi:
-    def __init__(self, on_event: EventCallback, token: str = "") -> None:
-        self._on_event = on_event
+    def __init__(self, token: str = "") -> None:
+        self._on_event: Optional[EventCallback] = None
         self._token = token
         self._conn: Connection | None = None
         self._pending: dict[str, asyncio.Future[dict[str, object]]] = {}
         self._write_lock = asyncio.Lock()
         self._seq = 0
+
+    def bind(self, on_event: EventCallback) -> None:
+        self._on_event = on_event
 
     @property
     def connected(self) -> bool:
@@ -132,7 +135,8 @@ class OneBotApi:
         except msgspec.ValidationError as exc:
             logger.warning(f"[OneBotUID] 事件字段不符合预期，已跳过: {exc}")
             return
-        await self._on_event(event)
+        if self._on_event is not None:
+            await self._on_event(event)
 
     def _resolve(self, echo: str, payload: dict[str, object]) -> None:
         future = self._pending.pop(echo, None)

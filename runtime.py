@@ -28,9 +28,19 @@ class LinkRunner:
         self.settings = settings
         self._supervisor: Optional[asyncio.Task[None]] = None
         self._worker: Optional[asyncio.Task[None]] = None
-        self._queue: asyncio.Queue[ObEvent] = asyncio.Queue(maxsize=_QUEUE_MAX)
+        self._queue: asyncio.Queue[tuple[OneBotApi, ObEvent]] = asyncio.Queue(maxsize=_QUEUE_MAX)
         self._api: Optional[OneBotApi] = None
+        self._apis: dict[str, OneBotApi] = {}
+        self._core_socket: Optional[CoreSocket] = None
+        self._attach_lock = asyncio.Lock()
         self._bridge = CoreBridge(settings.route_bot_id)
+        self._sender = OutboundSender(
+            pick_api=self._pick_api,
+            push=self._bridge.push,
+            settings=settings,
+            self_id=lambda: self._self_id,
+            nickname=lambda: self._self_nickname,
+        )
         self._wake = asyncio.Event()
         self._connected_at: Optional[float] = None
         self._self_id = ""
@@ -77,19 +87,29 @@ class LinkRunner:
         if api is not None:
             await api.close()
 
+        for item in list(self._apis.values()):
+            await item.close()
+        self._apis.clear()
+        self._core_socket = None
+
         await self._bridge.shutdown()
         logger.info(f"[OneBotUID] 连接 {self.settings.label} 已停止")
 
     async def force_reconnect(self) -> str:
         self._wake.set()
+        if self.settings.is_server:
+            apis = list(self._apis.values())
+            for item in apis:
+                if item.connected:
+                    await item.close()
+            if apis:
+                return f"已断开 {len(apis)} 个协议端连接，等待它们重新接入"
+            return f"正在监听 {self.settings.endpoint}，等待协议端接入"
+
         api = self._api
         if api is not None and api.connected:
             await api.close()
-            if self.settings.is_server:
-                return "已断开协议端连接，等待它重新接入"
             return "已断开当前连接，正在重连"
-        if self.settings.is_server:
-            return f"正在监听 {self.settings.endpoint}，等待协议端接入"
         return "已触发重连，等待协议端就绪"
 
     @property
@@ -109,6 +129,8 @@ class LinkRunner:
             f"连接标识: {settings.route_bot_id}",
             f"平台标识: {settings.platform_bot_id}",
         ]
+        if settings.is_server:
+            lines.append(f"已接入协议端: {len(self._apis)} 个")
         if self._connected_at is not None:
             lines.append(f"在线时长: {_format_duration(time.time() - self._connected_at)}")
         lines.append(f"连续失败: {self._attempts} 次")
@@ -150,8 +172,8 @@ class LinkRunner:
             await self._sleep(float(self.settings.reconnect_interval))
 
     async def _run_client(self) -> None:
-        api = OneBotApi(self._submit, self.settings.access_token)
-        socket: Optional[CoreSocket] = None
+        api = OneBotApi(token=self.settings.access_token)
+        api.bind(lambda event: self._submit(api, event))
 
         async def on_ready() -> None:
             await self._on_connected(api, self.settings.ws_url)
@@ -161,14 +183,13 @@ class LinkRunner:
 
         try:
             await api.open(self.settings.ws_url)
-            socket = await self._bridge.attach(self._make_sender(api))
+            await self._attach_core()
             self._api = api
             await api.serve_connection(on_ready, on_closed)
         finally:
             self._release(api, "与协议端的连接已断开")
             await api.close()
-            if socket is not None:
-                await self._bridge.detach(socket)
+            await self._detach_core_if_idle()
 
     async def _run_server(self) -> None:
         async def handler(conn: ServerConnection) -> None:
@@ -196,17 +217,13 @@ class LinkRunner:
             await conn.close(code=1008, reason="invalid token")
             return
 
-        api = OneBotApi(self._submit, self.settings.access_token)
+        api = OneBotApi(token=self.settings.access_token)
+        api.bind(lambda event: self._submit(api, event))
         api.adopt(conn)
-        socket = await self._bridge.attach(self._make_sender(api))
-        previous = self._api
-        self._api = api
-        if previous is not None and previous.connected:
-            logger.info(f"[OneBotUID] {self.settings.label} 新的 WS服务器 连接已接入，断开旧连接")
-            await previous.close()
+        await self._attach_core()
 
         async def on_ready() -> None:
-            await self._on_connected(api, f"{self.settings.endpoint} 上接入的协议端")
+            await self._register_server_api(api, f"{self.settings.endpoint} 上接入的协议端")
 
         async def on_closed() -> None:
             self._release(api, "协议端已断开")
@@ -218,31 +235,71 @@ class LinkRunner:
         finally:
             self._release(api, "协议端已断开")
             await api.close()
-            await self._bridge.detach(socket)
+            await self._detach_core_if_idle()
 
-    def _release(self, api: OneBotApi, message: str) -> None:
-        if self._api is not api:
-            return
-        self._api = None
-        if self._connected_at is not None:
-            logger.warning(f"[OneBotUID] {self.settings.label} {message}")
-        self._connected_at = None
-
-    def _make_sender(self, api: OneBotApi) -> OutboundSender:
-        return OutboundSender(
-            api=api,
-            push=self._bridge.push,
-            settings=self.settings,
-            self_id=lambda: self._self_id,
-            nickname=lambda: self._self_nickname,
+    async def _register_server_api(self, api: OneBotApi, label: str) -> None:
+        self_id, nickname = await self._fetch_login_info(api)
+        key = self_id or f"conn-{id(api)}"
+        previous = self._apis.get(key)
+        if previous is not None and previous is not api:
+            logger.info(f"[OneBotUID] {self.settings.label} 账号 {key} 重复接入，断开旧连接")
+            await previous.close()
+        self._apis[key] = api
+        if not self._self_id and self_id:
+            self._self_id, self._self_nickname = self_id, nickname
+        self._mark_online()
+        logger.success(
+            f"[OneBotUID] {self.settings.label} 已连接 {label}"
+            f"（bot_self_id={self_id or '未知'}，当前 {len(self._apis)} 个协议端）"
         )
 
+    def _release(self, api: OneBotApi, message: str) -> None:
+        dropped = False
+        if self._api is api:
+            self._api = None
+            dropped = True
+        for key, item in list(self._apis.items()):
+            if item is api:
+                self._apis.pop(key, None)
+                dropped = True
+        if dropped and self._connected_at is not None:
+            logger.warning(f"[OneBotUID] {self.settings.label} {message}")
+        if self._api is None and not self._apis:
+            self._connected_at = None
+
+    async def _attach_core(self) -> None:
+        async with self._attach_lock:
+            if self._core_socket is None:
+                self._core_socket = await self._bridge.attach(self._sender)
+
+    async def _detach_core_if_idle(self) -> None:
+        async with self._attach_lock:
+            if self._api is not None or self._apis or self._core_socket is None:
+                return
+            socket = self._core_socket
+            self._core_socket = None
+            await self._bridge.detach(socket)
+
+    def _pick_api(self, self_id: str) -> Optional[OneBotApi]:
+        if not self.settings.is_server:
+            return self._api
+        if self_id:
+            api = self._apis.get(self_id)
+            if api is not None:
+                return api
+        if len(self._apis) == 1:
+            return next(iter(self._apis.values()))
+        return None
+
     async def _on_connected(self, api: OneBotApi, label: str) -> None:
+        self._self_id, self._self_nickname = await self._fetch_login_info(api)
+        self._mark_online()
+        logger.success(f"[OneBotUID] {self.settings.label} 已连接 {label}（bot_self_id={self._self_id or '未知'}）")
+
+    def _mark_online(self) -> None:
         self._connected_at = time.time()
         self._attempts = 0
         self._last_error = ""
-        self._self_id, self._self_nickname = await self._fetch_login_info(api)
-        logger.success(f"[OneBotUID] {self.settings.label} 已连接 {label}（bot_self_id={self._self_id or '未知'}）")
 
     async def _fetch_login_info(self, api: OneBotApi) -> tuple[str, str]:
         resp = await api.call("get_login_info", {})
@@ -252,17 +309,17 @@ class LinkRunner:
         nickname = data.get("nickname")
         return sid(data.get("user_id")), nickname if isinstance(nickname, str) else ""
 
-    async def _submit(self, event: ObEvent) -> None:
+    async def _submit(self, api: OneBotApi, event: ObEvent) -> None:
         try:
-            self._queue.put_nowait(event)
+            self._queue.put_nowait((api, event))
         except asyncio.QueueFull:
             logger.warning(f"[OneBotUID] {self.settings.label} 事件队列已满，丢弃一条事件")
 
     async def _consume_events(self) -> None:
         while True:
-            event = await self._queue.get()
+            api, event = await self._queue.get()
             try:
-                await self._handle_event(event)
+                await self._handle_event(api, event)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -270,10 +327,11 @@ class LinkRunner:
             finally:
                 self._queue.task_done()
 
-    async def _handle_event(self, event: ObEvent) -> None:
-        api = self._api
-        if api is None:
+    async def _handle_event(self, api: OneBotApi, event: ObEvent) -> None:
+        if not api.connected:
             return
+
+        self._adopt_event_self_id(api, event)
 
         settings = self.settings
         ctx = InboundContext(
@@ -286,6 +344,19 @@ class LinkRunner:
         msg = await event_to_receive(event, ctx)
         if msg is not None:
             await self._bridge.push(msg)
+
+    def _adopt_event_self_id(self, api: OneBotApi, event: ObEvent) -> None:
+        if not self.settings.is_server:
+            return
+        self_id = sid(event.self_id)
+        if not self_id or self_id == "0" or self._apis.get(self_id) is api:
+            return
+        for key, item in list(self._apis.items()):
+            if item is api:
+                self._apis.pop(key, None)
+        self._apis[self_id] = api
+        if not self._self_id:
+            self._self_id = self_id
 
     async def _sleep(self, seconds: float) -> None:
         try:
