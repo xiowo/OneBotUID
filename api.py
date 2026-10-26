@@ -1,9 +1,11 @@
-from typing import Optional
+from typing import Union, Optional, cast
 
 from .runtime import adapter_runtime
 from .onebot_api import response_failed
 
 DEFAULT_TIMEOUT = 30.0
+
+OneBotData = Union[dict[str, object], list[object], str, int, float, bool, None]
 
 
 class OneBotApiError(RuntimeError):
@@ -25,7 +27,7 @@ async def call_bot_api(
     params: Optional[dict[str, object]] = None,
     self_id: str = "",
     timeout: float = DEFAULT_TIMEOUT,
-) -> dict[str, object]:
+) -> OneBotData:
     """调 OneBot 接口，返回响应里的 data；失败抛 ``OneBotApiError``。
 
     :param action: OneBot v11 接口名，如 ``get_group_member_list``。
@@ -44,7 +46,6 @@ async def call_bot_api(
         message = resp.get("wording") or resp.get("message") or "协议端返回失败"
         raise OneBotApiError(action, str(message), resp)
 
-    data = resp.get("data")
-    if not isinstance(data, dict):
+    if "data" not in resp:
         raise OneBotApiError(action, "响应里没有 data", resp)
-    return data
+    return cast(OneBotData, resp["data"])

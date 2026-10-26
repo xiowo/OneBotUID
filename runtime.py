@@ -31,6 +31,7 @@ class LinkRunner:
         self._queue: asyncio.Queue[tuple[OneBotApi, ObEvent]] = asyncio.Queue(maxsize=_QUEUE_MAX)
         self._api: Optional[OneBotApi] = None
         self._apis: dict[str, OneBotApi] = {}
+        self._pending: dict[int, OneBotApi] = {}
         self._core_socket: Optional[CoreSocket] = None
         self._attach_lock = asyncio.Lock()
         self._bridge = CoreBridge(settings.route_bot_id)
@@ -90,6 +91,7 @@ class LinkRunner:
         for item in list(self._apis.values()):
             await item.close()
         self._apis.clear()
+        self._pending.clear()
         self._core_socket = None
 
         await self._bridge.shutdown()
@@ -130,7 +132,7 @@ class LinkRunner:
             f"平台标识: {settings.platform_bot_id}",
         ]
         if settings.is_server:
-            lines.append(f"已接入协议端: {len(self._apis)} 个")
+            lines.append(f"已接入协议端: {len(self._connected_apis())} 个")
         if self._connected_at is not None:
             lines.append(f"在线时长: {_format_duration(time.time() - self._connected_at)}")
         lines.append(f"连续失败: {self._attempts} 次")
@@ -183,8 +185,8 @@ class LinkRunner:
 
         try:
             await api.open(self.settings.ws_url)
-            await self._attach_core()
             self._api = api
+            await self._attach_core()
             await api.serve_connection(on_ready, on_closed)
         finally:
             self._release(api, "与协议端的连接已断开")
@@ -220,6 +222,7 @@ class LinkRunner:
         api = OneBotApi(token=self.settings.access_token)
         api.bind(lambda event: self._submit(api, event))
         api.adopt(conn)
+        self._pending[id(api)] = api
         await self._attach_core()
 
         async def on_ready() -> None:
@@ -239,6 +242,7 @@ class LinkRunner:
 
     async def _register_server_api(self, api: OneBotApi, label: str) -> None:
         self_id, nickname = await self._fetch_login_info(api)
+        self._pending.pop(id(api), None)
         key = self_id or f"conn-{id(api)}"
         previous = self._apis.get(key)
         if previous is not None and previous is not api:
@@ -250,11 +254,12 @@ class LinkRunner:
         self._mark_online()
         logger.success(
             f"[OneBotUID] {self.settings.label} 已连接 {label}"
-            f"（bot_self_id={self_id or '未知'}，当前 {len(self._apis)} 个协议端）"
+            f"（bot_self_id={self_id or '未知'}，当前 {len(self._connected_apis())} 个协议端）"
         )
 
     def _release(self, api: OneBotApi, message: str) -> None:
         dropped = False
+        self._pending.pop(id(api), None)
         if self._api is api:
             self._api = None
             dropped = True
@@ -264,8 +269,12 @@ class LinkRunner:
                 dropped = True
         if dropped and self._connected_at is not None:
             logger.warning(f"[OneBotUID] {self.settings.label} {message}")
-        if self._api is None and not self._apis:
+        if self._api is None and not self._apis and not self._pending:
             self._connected_at = None
+
+    def _connected_apis(self) -> list[OneBotApi]:
+        """所有已建立连接的协议端，包含还没拿到 login_info 的。"""
+        return [*self._apis.values(), *self._pending.values()]
 
     async def _attach_core(self) -> None:
         async with self._attach_lock:
@@ -274,7 +283,7 @@ class LinkRunner:
 
     async def _detach_core_if_idle(self) -> None:
         async with self._attach_lock:
-            if self._api is not None or self._apis or self._core_socket is None:
+            if self._api is not None or self._apis or self._pending or self._core_socket is None:
                 return
             socket = self._core_socket
             self._core_socket = None
@@ -289,9 +298,15 @@ class LinkRunner:
                 return None
             return api
         if self_id:
-            return self._apis.get(self_id)
-        if len(self._apis) == 1:
-            return next(iter(self._apis.values()))
+            api = self._apis.get(self_id)
+            if api is not None:
+                return api
+            if not self._apis and len(self._pending) == 1:
+                return next(iter(self._pending.values()))
+            return None
+        connected = self._connected_apis()
+        if len(connected) == 1:
+            return connected[0]
         return None
 
     def _pick_api(self, self_id: str) -> Optional[OneBotApi]:
@@ -301,8 +316,9 @@ class LinkRunner:
             api = self._apis.get(self_id)
             if api is not None:
                 return api
-        if len(self._apis) == 1:
-            return next(iter(self._apis.values()))
+        connected = self._connected_apis()
+        if len(connected) == 1:
+            return connected[0]
         return None
 
     async def _on_connected(self, api: OneBotApi, label: str) -> None:
