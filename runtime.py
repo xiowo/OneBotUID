@@ -1,6 +1,6 @@
 import time
 import asyncio
-from typing import Optional
+from typing import Optional, cast
 from urllib.parse import parse_qs, urlsplit
 
 from websockets.exceptions import InvalidURI, ConnectionClosed, InvalidHandshake
@@ -527,6 +527,13 @@ def _format_duration(seconds: float) -> str:
 
 
 adapter_runtime = AdapterManager()
+
+
+def current_runtime() -> AdapterManager:
+    live = getattr(gsuid_core, _RUNTIME_SLOT, None)
+    if getattr(live, "_runtime_tag", "") == RUNTIME_TAG:
+        return cast(AdapterManager, live)
+    return adapter_runtime
 
 
 async def _stop_previous() -> None:

@@ -1,6 +1,6 @@
 from typing import Union, Optional, cast
 
-from .runtime import adapter_runtime
+from .runtime import current_runtime
 from .onebot_api import response_failed
 
 DEFAULT_TIMEOUT = 30.0
@@ -35,7 +35,7 @@ async def call_bot_api(
     :param self_id: 目标机器人 QQ，一般传 ``ev.bot_self_id``；只有一条连接时可留空。
     :param timeout: 等协议端响应的秒数。
     """
-    api = adapter_runtime.find_api(self_id)
+    api = current_runtime().find_api(self_id)
     if api is None:
         raise OneBotApiError(action, f"找不到 self_id={self_id or '未知'} 对应的连接")
 
