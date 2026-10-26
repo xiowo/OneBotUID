@@ -16,6 +16,7 @@
 - **🔄 断线重连**: 自动检测连接状态并重连，可设间隔与次数上限，也能用指令手动触发。
 - **📊 状态监控**: 内置状态指令，只看**收到指令的那条连接**，含连接方式、在线时长与最近错误。
 - **🧩 原生下发链路**: 复用核心的发送队列、日志回显、撤回回执，插件不重复实现一套。
+- **🧪 接口直调**: 其他插件 import `call_bot_api()` 就能调任意 OneBot 接口，走这条已有的 WS 连接，不用另配 HTTP。
 
 ## 🛠️ 安装说明
 
@@ -123,6 +124,51 @@
 | `onebot重连` | 断开并重连**当前连接**；`WS服务器` 为断开协议端、等它重新接入 | 主人 |
 
 > 「当前连接」指指令到达的那条连接，不会影响同核心下的其他连接。
+
+## 🧪 给其他插件调 OneBot 接口
+
+`api.py` 对外提供 `call_bot_api()`：用适配器已建立的 WS 连接去调协议端，再把结果交回来。不用另外配 OneBot 的 HTTP 地址，也不用新开连接。
+
+```python
+from gsuid_core.sv import SV
+from gsuid_core.bot import Bot
+from gsuid_core.models import Event
+
+sv = SV("MyPlugin", pm=0, area="ALL")
+
+
+@sv.on_command("群成员")
+async def group_members(bot: Bot, ev: Event) -> None:
+    # 延迟 import：核心启动早期 OneBotUID 可能还没加载完
+    from gsuid_core.plugins.OneBotUID.api import OneBotApiError, call_bot_api
+
+    try:
+        data = await call_bot_api(
+            "get_group_member_list",
+            {"group_id": ev.group_id},
+            self_id=ev.bot_self_id,
+        )
+    except OneBotApiError as exc:
+        await bot.send(f"没拿到群成员列表：{exc}")
+        return
+    await bot.send(f"群里有 {data.get('member_count')} 人")
+```
+
+| 参数 | 说明 |
+| :--- | :--- |
+| `action` | OneBot v11 接口名，例如 `get_group_info`、`set_group_card`、`get_msg` |
+| `params` | 接口参数，原样传给协议端 |
+| `self_id` | 目标机器人 QQ，一般传 `ev.bot_self_id`；只有一条连接时可留空 |
+| `timeout` | 等协议端响应的秒数，默认 30 |
+
+调通返回响应里的 `data`（`dict`）。以下情况抛 `OneBotApiError`：
+
+- 按 `self_id` 找不到对应的连接
+- 连接不可用或等满 `timeout` 没回包
+- 协议端返回 `retcode` 不是 0 / 1
+- 响应里没有 `data`
+
+异常带 `action` 和 `response`（完整响应，含 `retcode`），需要区分「接口报错」和「没连上」时读这两个字段。
 
 ## 🔌 协议端怎么配
 

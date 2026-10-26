@@ -280,6 +280,20 @@ class LinkRunner:
             self._core_socket = None
             await self._bridge.detach(socket)
 
+    def find_api(self, self_id: str) -> Optional[OneBotApi]:
+        if not self.settings.is_server:
+            api = self._api
+            if api is None:
+                return None
+            if self_id and self._self_id and self_id != self._self_id:
+                return None
+            return api
+        if self_id:
+            return self._apis.get(self_id)
+        if len(self._apis) == 1:
+            return next(iter(self._apis.values()))
+        return None
+
     def _pick_api(self, self_id: str) -> Optional[OneBotApi]:
         if not self.settings.is_server:
             return self._api
@@ -404,6 +418,18 @@ class AdapterManager:
                 return runner
         if len(self._runners) == 1:
             return next(iter(self._runners.values()))
+        return None
+
+    def find_api(self, self_id: str = "") -> Optional[OneBotApi]:
+        """在所有连接里按 self_id 找协议端连接。"""
+        if self_id:
+            for runner in self._runners.values():
+                api = runner.find_api(self_id)
+                if api is not None:
+                    return api
+            return None
+        if len(self._runners) == 1:
+            return next(iter(self._runners.values())).find_api("")
         return None
 
     async def force_reconnect(self, route_bot_id: Optional[str] = None) -> str:
