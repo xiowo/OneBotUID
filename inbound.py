@@ -1,5 +1,7 @@
 import re
+import base64
 from typing import Optional
+from pathlib import Path
 from dataclasses import dataclass
 
 import msgspec
@@ -12,8 +14,11 @@ from .onebot_api import OneBotApi, response_data, response_failed
 
 _AVATAR = "https://q1.qlogo.cn/g?b=qq&nk={}&s=640"
 _NODE_MARK = "[合并转发]"
+_IMAGE_MARK = "[图片]"
 _NODE_MAX_DEPTH = 3
 _FILE_BASE64_MAX = 2 * 1024 * 1024
+_FILE_LOCAL_MAX = 1536 * 1024
+_HTTP_PREFIX = ("http://", "https://")
 _FORWARD_TYPES = ("forward", "forward_msg", "node")
 _CQ_PATTERN = re.compile(r"\[CQ:(\w+)(?:,[^\]]*)?\]")
 _CQ_PLACEHOLDER = {
@@ -145,43 +150,93 @@ async def _segments_to_content(
 
 
 async def _file_message(seg: ObSegment, ctx: InboundContext, scope: Optional[ChatScope]) -> Message:
-    name = pick(seg, "file", "name") or "file"
-    payload = pick(seg, "url") or await _fetch_file_url(seg, ctx, scope)
+    name, payload = await _file_payload(seg, ctx, scope)
     if not payload:
-        logger.debug(f"[OneBotUID] 文件段取不到链接，降级为文本: {name}")
+        logger.debug(f"[OneBotUID] 文件段取不到内容，降级为文本: {name}")
         return Message("text", f"[文件:{name}]")
     return Message("file", f"{name}|{payload}")
 
 
-async def _fetch_file_url(seg: ObSegment, ctx: InboundContext, scope: Optional[ChatScope]) -> str:
-    file_id = pick(seg, "file_id", "fid", "file")
-    if not file_id or scope is None:
+async def _file_payload(seg: ObSegment, ctx: InboundContext, scope: Optional[ChatScope]) -> tuple[str, str]:
+    name = _file_name(seg)
+    url = pick(seg, "url")
+    if url.startswith(_HTTP_PREFIX):
+        return name, url
+    return name, await _fetch_file_payload(seg, ctx, scope)
+
+
+def _file_name(seg: ObSegment) -> str:
+    raw = pick(seg, "file", "name", "file_name").replace("\\", "/")
+    return raw.rsplit("/", 1)[-1].strip() or "file"
+
+
+async def _fetch_file_payload(seg: ObSegment, ctx: InboundContext, scope: Optional[ChatScope]) -> str:
+    if scope is None:
         return ""
 
-    for action, params in _file_actions(file_id, scope):
+    file_id = pick(seg, "file_id", "fid")
+    for action, params in _file_actions(file_id, _file_name(seg), scope):
         resp = await ctx.api.call(action, params)
-        if response_failed(resp):
+        if _response_bad(resp):
             continue
         data = response_data(resp)
-        if data is None:
+        if not isinstance(data, dict):
             continue
-        url = data.get("url")
-        if isinstance(url, str) and url:
-            return url
-        raw = data.get("base64")
-        if isinstance(raw, str) and raw and len(raw) <= _FILE_BASE64_MAX:
-            return raw[len("base64://") :] if raw.startswith("base64://") else raw
+        payload = _payload_of(data)
+        if payload:
+            return payload
     return ""
 
 
-def _file_actions(file_id: str, scope: ChatScope) -> list[tuple[str, dict[str, object]]]:
-    if scope.group_id:
-        head = ("get_group_file_url", {"group_id": id_param(scope.group_id), "file_id": file_id})
-    elif scope.user_id:
-        head = ("get_private_file_url", {"user_id": id_param(scope.user_id), "file_id": file_id})
-    else:
-        return []
-    return [head, ("get_file", {"file_id": file_id})]
+def _response_bad(resp: Optional[dict[str, object]]) -> bool:
+    if resp is None:
+        return True
+    retcode = resp.get("retcode")
+    return isinstance(retcode, int) and retcode not in (0, 1)
+
+
+def _payload_of(data: dict[str, object]) -> str:
+    url = data.get("url")
+    if isinstance(url, str) and url.startswith(_HTTP_PREFIX):
+        return url
+
+    raw = data.get("base64")
+    if isinstance(raw, str) and raw:
+        payload = raw[len("base64://") :] if raw.startswith("base64://") else raw
+        if len(payload) <= _FILE_BASE64_MAX:
+            return payload
+
+    for key in ("file", "path"):
+        local = data.get(key)
+        if isinstance(local, str) and local:
+            payload = _read_local_as_base64(local)
+            if payload:
+                return payload
+    return ""
+
+
+def _read_local_as_base64(path: str) -> str:
+    local = Path(path)
+    try:
+        if not local.is_file() or local.stat().st_size > _FILE_LOCAL_MAX:
+            return ""
+        return base64.b64encode(local.read_bytes()).decode()
+    except OSError:
+        return ""
+
+
+def _file_actions(file_id: str, name: str, scope: ChatScope) -> list[tuple[str, dict[str, object]]]:
+    actions: list[tuple[str, dict[str, object]]] = []
+    if file_id and scope.group_id:
+        actions.append(("get_group_file_url", {"group_id": id_param(scope.group_id), "file_id": file_id}))
+    elif file_id and scope.user_id:
+        actions.append(("get_private_file_url", {"file_id": file_id}))
+        actions.append(("get_private_file_url", {"user_id": id_param(scope.user_id), "file_id": file_id}))
+    if file_id:
+        actions.append(("get_file", {"file_id": file_id}))
+    if name:
+        actions.append(("get_file", {"file": name}))
+    return actions
 
 
 async def _quote_context(reply_id: str, ctx: InboundContext, scope: Optional[ChatScope] = None) -> list[Message]:
@@ -201,8 +256,8 @@ async def _quote_context(reply_id: str, ctx: InboundContext, scope: Optional[Cha
         return placeholder
 
     text = "".join(pick(seg, "text") for seg in segments if seg.type == "text").strip()
-    images = [pick(seg, "url", "file") for seg in segments if seg.type == "image"]
     forward = [seg for seg in segments if seg.type in _FORWARD_TYPES]
+    files = [seg for seg in segments if seg.type == "file"]
 
     items: list[Message] = []
     for seg in forward:
@@ -210,11 +265,47 @@ async def _quote_context(reply_id: str, ctx: InboundContext, scope: Optional[Cha
     if forward and not items:
         text = "\n".join([text, *(_forward_title(seg) for seg in forward)]).strip()
 
+    image_msgs: list[Message] = []
+    for seg in segments:
+        if seg.type != "image":
+            continue
+        text = "\n".join(item for item in (text, _image_label(seg)) if item)
+        media = pick(seg, "url")
+        if not media:
+            raw = pick(seg, "file")
+            if raw.startswith((*_HTTP_PREFIX, "base64://")):
+                media = raw
+        if media:
+            image_msgs.append(Message("image", media))
+
+    quoted_scope = _quote_scope(data, scope)
+    file_msgs: list[Message] = []
+    for seg in files:
+        name, payload = await _file_payload(seg, ctx, quoted_scope)
+        text = "\n".join(item for item in (text, f"[文件:{name}]") if item)
+        if payload:
+            file_msgs.append(Message("file", f"{name}|{payload}"))
+
     content: list[Message] = [Message("reply", text)]
-    content.extend(Message("image", url) for url in images if url)
+    content.extend(image_msgs)
+    content.extend(file_msgs)
     if items:
         content.append(Message("node", items))
     return content
+
+
+def _image_label(seg: ObSegment) -> str:
+    raw = pick(seg, "summary", "file", "name").strip().strip("[]").strip()
+    return f"[图片:{raw}]" if raw and raw != "图片" else _IMAGE_MARK
+
+
+def _quote_scope(data: dict[str, object], scope: Optional[ChatScope]) -> Optional[ChatScope]:
+    group_id = sid(data.get("group_id"))
+    if group_id:
+        return ChatScope(user_id=sid(data.get("user_id")), group_id=group_id)
+    if scope is not None and not scope.group_id:
+        return ChatScope(user_id=scope.user_id)
+    return scope
 
 
 def _quote_in_scope(data: dict[str, object], scope: Optional[ChatScope], self_id: str) -> bool:
@@ -245,7 +336,7 @@ async def _forward_items(
 
     seen.add(forward_id)
     resp = await ctx.api.call("get_forward_msg", {"id": forward_id})
-    if response_failed(resp):
+    if resp is None or response_failed(resp):
         return []
     data = response_data(resp)
     entries = _forward_entries(data if data is not None else resp)
