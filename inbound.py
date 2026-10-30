@@ -1,4 +1,5 @@
 import re
+import json
 import base64
 from typing import Optional
 from pathlib import Path
@@ -15,6 +16,8 @@ from .onebot_api import OneBotApi, response_data, response_failed
 _AVATAR = "https://q1.qlogo.cn/g?b=qq&nk={}&s=640"
 _NODE_MARK = "[合并转发]"
 _IMAGE_MARK = "[图片]"
+_CARD_MARK = "[卡片]"
+_CARD_DEPTH = 4
 _NODE_MAX_DEPTH = 3
 _FILE_BASE64_MAX = 2 * 1024 * 1024
 _FILE_LOCAL_MAX = 1536 * 1024
@@ -27,6 +30,7 @@ _CQ_PLACEHOLDER = {
     "mface": "[表情]",
     "record": "[语音]",
     "video": "[视频]",
+    "json": _CARD_MARK,
     "reply": "",
 }
 
@@ -146,7 +150,69 @@ async def _segments_to_content(
             content.append(Message("node", nodes or [Message("text", _NODE_MARK)]))
         elif kind == "mface":
             content.append(Message("text", pick(seg, "summary") or "[表情]"))
+        elif kind == "json":
+            content.extend(_json_card(pick(seg, "data")))
     return content
+
+
+def _json_card(raw: str) -> list[Message]:
+    card = _load_card(raw)
+    if card is None:
+        return [Message("text", _CARD_MARK)]
+    return [Message("card", {"type": "json", "content": card}), Message("text", _card_text(card))]
+
+
+def _card_text(card: Optional[dict[str, object]]) -> str:
+    if card is None:
+        return _CARD_MARK
+
+    prompt = _str_of(card.get("prompt"))
+    title = _nested_str(card, "title")
+    desc = _nested_str(card, "desc")
+    url = _nested_str(card, "jumpUrl", "qqdocurl")
+
+    lines: list[str] = []
+    for item in (prompt or title, desc):
+        if item and item not in lines:
+            lines.append(item)
+    if url and not any(url in line for line in lines):
+        lines.append(url)
+    return "\n".join(lines) or _CARD_MARK
+
+
+def _load_card(raw: str) -> Optional[dict[str, object]]:
+    if not raw:
+        return None
+    try:
+        card = json.loads(raw)
+    except ValueError:
+        logger.debug("[OneBotUID] 卡片段不是合法 JSON，降级为占位文本")
+        return None
+    return card if isinstance(card, dict) else None
+
+
+def _str_of(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _nested_str(payload: object, *keys: str, depth: int = _CARD_DEPTH) -> str:
+    if depth <= 0:
+        return ""
+    if isinstance(payload, dict):
+        for key in keys:
+            found = _str_of(payload.get(key))
+            if found:
+                return found
+        children: object = payload.values()
+    elif isinstance(payload, list):
+        children = payload
+    else:
+        return ""
+    for child in children:
+        found = _nested_str(child, *keys, depth=depth - 1)
+        if found:
+            return found
+    return ""
 
 
 async def _file_message(seg: ObSegment, ctx: InboundContext, scope: Optional[ChatScope]) -> Message:
@@ -255,7 +321,7 @@ async def _quote_context(reply_id: str, ctx: InboundContext, scope: Optional[Cha
     if not segments:
         return placeholder
 
-    text = "".join(pick(seg, "text") for seg in segments if seg.type == "text").strip()
+    text = "".join(_inline_text(seg) for seg in segments if seg.type in ("text", "json")).strip()
     forward = [seg for seg in segments if seg.type in _FORWARD_TYPES]
     files = [seg for seg in segments if seg.type == "file"]
 
@@ -292,6 +358,12 @@ async def _quote_context(reply_id: str, ctx: InboundContext, scope: Optional[Cha
     if items:
         content.append(Message("node", items))
     return content
+
+
+def _inline_text(seg: ObSegment) -> str:
+    if seg.type == "json":
+        return _card_text(_load_card(pick(seg, "data")))
+    return pick(seg, "text")
 
 
 def _image_label(seg: ObSegment) -> str:
