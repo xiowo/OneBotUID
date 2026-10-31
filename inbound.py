@@ -151,11 +151,15 @@ async def _segments_to_content(
         elif kind == "mface":
             content.append(Message("text", pick(seg, "summary") or "[表情]"))
         elif kind == "json":
-            content.extend(_json_card(pick(seg, "data")))
+            content.extend(_json_card(_card_raw(seg)))
     return content
 
 
-def _json_card(raw: str) -> list[Message]:
+def _card_raw(seg: ObSegment) -> object:
+    return seg.data.get("data")
+
+
+def _json_card(raw: object) -> list[Message]:
     card = _load_card(raw)
     if card is None:
         return [Message("text", _CARD_MARK)]
@@ -173,15 +177,21 @@ def _card_text(card: Optional[dict[str, object]]) -> str:
 
     lines: list[str] = []
     for item in (prompt or title, desc):
-        if item and item not in lines:
+        if item and not _is_placeholder(item) and item not in lines:
             lines.append(item)
     if url and not any(url in line for line in lines):
         lines.append(url)
     return "\n".join(lines) or _CARD_MARK
 
 
-def _load_card(raw: str) -> Optional[dict[str, object]]:
-    if not raw:
+def _is_placeholder(text: str) -> bool:
+    return text.isdigit()
+
+
+def _load_card(raw: object) -> Optional[dict[str, object]]:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw:
         return None
     try:
         card = json.loads(raw)
@@ -362,7 +372,7 @@ async def _quote_context(reply_id: str, ctx: InboundContext, scope: Optional[Cha
 
 def _inline_text(seg: ObSegment) -> str:
     if seg.type == "json":
-        return _card_text(_load_card(pick(seg, "data")))
+        return _card_text(_load_card(_card_raw(seg)))
     return pick(seg, "text")
 
 

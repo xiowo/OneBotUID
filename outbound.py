@@ -240,6 +240,9 @@ class OutboundSender:
                 segments.extend(self._node_segments(data))
             elif kind == "markdown":
                 segments.extend(_text_segments(str(data)))
+            elif kind == "card":
+                card_type = data.get("type") if isinstance(data, dict) else None
+                logger.info(f"[OneBotUID] 协议端发不出卡片，该段已跳过（type={card_type or '未知'}）")
         return segments
 
     def _summary(self) -> str:
