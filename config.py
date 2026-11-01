@@ -116,6 +116,13 @@ CONFIG_DEFAULT: dict[str, GSC] = {
         desc="收到引用回复时调用 get_msg 取被引用消息的内容，关闭可省一次接口调用。",
         data=True,
     ),
+    "_DividerProfile": GsDivider("群资料缓存", ""),
+    "info_cache_hours": GsIntConfig(
+        title="群资料缓存时长",
+        desc="收到群消息时查一次群名 / 群头像 / 群人数，结果写进数据库并本地缓存这么久（小时）。"
+        "控制台的会话列表和信息卡读的就是这份数据；填 0 表示不查、也不写。",
+        data=24,
+    ),
     "_DividerClient": GsDivider("WS客户端连接", ""),
     "client_links": GsRepeatGroupConfig(
         title="连接列表",
@@ -307,6 +314,7 @@ class Settings:
     custom_image_summary: str
     node_qq: str
     node_name: str
+    info_cache_hours: int
 
     @property
     def is_server(self) -> bool:
@@ -372,6 +380,7 @@ def _build_settings(row: dict[str, GSC], mode: str) -> Settings:
         custom_image_summary=_custom("custom_image_summary"),
         node_qq=_custom("node_qq").strip(),
         node_name=_custom("node_name").strip(),
+        info_cache_hours=max(0, _as_int(_global("info_cache_hours"), 24)),
     )
 
 

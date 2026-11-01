@@ -10,6 +10,7 @@ import gsuid_core
 from gsuid_core.logger import logger
 from gsuid_core.shutdown import shutdown_event
 
+from . import profile_cache
 from .config import Settings, load_links
 from .models import ObEvent, sid
 from .inbound import InboundContext, event_to_receive
@@ -364,6 +365,14 @@ class LinkRunner:
         self._adopt_event_self_id(api, event)
 
         settings = self.settings
+        if event.post_type == "message" and event.group_id:
+            profile_cache.schedule(
+                api,
+                settings.platform_bot_id,
+                sid(event.group_id),
+                settings.info_cache_hours,
+            )
+
         ctx = InboundContext(
             platform_bot_id=settings.platform_bot_id,
             self_id=self._self_id,
@@ -425,6 +434,7 @@ class AdapterManager:
         self._runners.clear()
         for runner in runners:
             await runner.stop()
+        profile_cache.reset()
         logger.info("[OneBotUID] 运行时已停止")
 
     def runner_of(self, route_bot_id: Optional[str]) -> Optional[LinkRunner]:

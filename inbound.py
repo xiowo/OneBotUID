@@ -10,6 +10,7 @@ import msgspec
 from gsuid_core.logger import logger
 from gsuid_core.models import Message, MessageReceive
 
+from . import profile_cache
 from .models import ObEvent, ObSegment, ObForwardNode, sid, pick, id_param
 from .onebot_api import OneBotApi, response_data, response_failed
 
@@ -105,6 +106,13 @@ async def _from_message(event: ObEvent, ctx: InboundContext) -> Optional[Message
         "role": event.sender.role,
         "avatar": _AVATAR.format(user_id),
     }
+    # 协议端的消息事件不带群名，从群资料缓存里取
+    profile = profile_cache.cached(group_id) if group_id else None
+    if profile is not None:
+        if profile.name:
+            sender["group_name"] = profile.name
+        if profile.icon:
+            sender["group_icon"] = profile.icon
 
     return MessageReceive(
         bot_id=ctx.platform_bot_id,
