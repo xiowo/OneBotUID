@@ -336,7 +336,7 @@ def _file_segment(raw: str) -> Optional[dict[str, object]]:
     if not sep:
         return None
     content = content.strip()
-    if content.startswith(("base64://", "http://", "https://")):
+    if content.startswith(("base64://", "file://", "http://", "https://")):
         file_value = content
     elif content.startswith("link://"):
         file_value = content[len("link://") :]
