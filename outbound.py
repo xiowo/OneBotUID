@@ -15,8 +15,6 @@ msgjson = msgspec.json
 
 _NODE_MAX = 99
 _LOG_PREFIX = "log_"
-_SIGNATURE_MAX = 32
-_SIGNATURE_PUNCT = "，,。.！!？?、；;：:"
 _CQ_AT_RE = re.compile(r"\[CQ:at,\s*qq=([0-9]+|all)\]", re.IGNORECASE)
 
 
@@ -265,45 +263,12 @@ class OutboundSender:
 
     def _build_nodes(self, items: list[Message]) -> list[dict[str, object]]:
         default_qq, default_name = self._node_identity()
-        if self._plain_lines(items):
-            return [self._make_node(self._to_segments([item]), default_qq, default_name) for item in items]
-
         nodes: list[dict[str, object]] = []
-        current: list[dict[str, object]] = []
-        nickname = default_name
-
-        def flush() -> None:
-            nonlocal current
-            if current:
-                nodes.append(self._make_node(current, default_qq, nickname))
-                current = []
-
-        for index, item in enumerate(items):
-            if item.type == "text":
-                text = str(item.data or "").strip()
-                if _is_signature(text) and index + 1 < len(items):
-                    flush()
-                    nickname = text.rstrip(":：").strip() or default_name
-                    continue
-            current.extend(self._to_segments([item]))
-
-        flush()
+        for item in items:
+            content = self._to_segments([item])
+            if content:
+                nodes.append(self._make_node(content, default_qq, default_name))
         return nodes
-
-    def _plain_lines(self, items: list[Message]) -> bool:
-        if len(items) < 2 or not all(item.type == "text" for item in items):
-            return False
-        signatures = sum(1 for item in items if _is_signature(str(item.data or "").strip()))
-        return signatures < 2
-
-
-def _is_signature(text: str) -> bool:
-    if not text.endswith((":", "：")):
-        return False
-    name = text.rstrip(":：").strip()
-    if not name or len(name) > _SIGNATURE_MAX:
-        return False
-    return not any(ch.isspace() or ch in _SIGNATURE_PUNCT for ch in name)
 
 
 def _text_segments(raw: str) -> list[dict[str, object]]:
